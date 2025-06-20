@@ -84,17 +84,10 @@ This repository contains analysis code for a clinical trial investigating sequen
 
 ## Data Requirements
 
-### Input Files
-- **Primary Data**: `CICPT_1558_data (2).xlsx` or `CICPT_1558_data (3).xlsx`
-  - Multiple sheets: `sampleID`, `nanostring`, `Olink`, `group`
-- **Flow Cytometry**: `18536 PD-1 flow data pivot 250611.xlsx`
-- **Response Mapping**: `ID response correlation.xlsx`
-
 ### Data Format Specifications
 - **Gene Expression**: Log2-transformed values
 - **Protein Expression**: NPX units (log2-scale)
 - **Flow Cytometry**: % of parent population, median fluorescence intensity
-- **Sample IDs**: Format like `01-027.B2W2FC`
 - **Response Groups**: EXT, INT, NON classifications
 
 ## Installation and Setup
@@ -210,7 +203,7 @@ exec(open('Time_Dependent_PemIL2.py').read())
 ## Data Corrections and Validation
 
 ### Log2 Transformation Handling
-- **Correct Method**: `log2FC = mean_group1 - mean_group2` (for log2 data)
+- `log2FC = mean_group1 - mean_group2` (for log2 data)
 
 ### Quality Control Features
 - Sample mapping verification
