@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[13]:
+# In[68]:
 
 
 #!/usr/bin/env python
@@ -587,7 +587,7 @@ if __name__ == "__main__":
     print("Usage: analyzer, results, summary = run_flow_analysis(flow_df_with_timepoints)")
 
 
-# In[17]:
+# In[69]:
 
 
 #!/usr/bin/env python
@@ -767,10 +767,708 @@ else:
     print("and contains the expected sheets: 'sampleID', 'group', and sheet index 2 for flow data")
 
 
-# In[18]:
+# In[70]:
 
 
 analyzer, results, summary_df = run_flow_analysis(flow_df_ready)
+
+
+# In[90]:
+
+
+#!/usr/bin/env python
+# coding: utf-8
+
+"""
+Cross-Sectional Temporal Analysis of Flow Cytometry Data
+Analyzes immune cell dynamics across timepoints and response groups
+"""
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
+from scipy.stats import false_discovery_control
+import warnings
+warnings.filterwarnings('ignore')
+
+plt.style.use('default')
+sns.set_context("paper", font_scale=1.2)
+plt.rcParams['font.family'] = 'Arial'
+
+class TemporalFlowAnalyzer:
+    def __init__(self, flow_df, sample_to_timepoint, measurement_col='Median'):
+        """
+        Initialize temporal analyzer
+        
+        Parameters:
+        - flow_df: DataFrame with flow data including response_group mapping
+        - sample_to_timepoint: Dictionary mapping sample IDs to timepoint info
+        - measurement_col: Which column to use for analysis
+        """
+        self.flow_df = flow_df.copy()
+        self.sample_to_timepoint = sample_to_timepoint
+        self.measurement_col = measurement_col
+        
+        # Add timepoint information to flow data
+        self._add_timepoint_info()
+        
+        # Define immune markers
+        self.immune_markers = {
+            'CD4': 'CD4-BV480',
+            'CD19': 'CD19-BUV496', 
+            'CD16': 'CD16-A647',
+            'CD25': 'CD25-BB515',
+            'CD15': 'CD15-BV711',
+            'CD33': 'CD33-PE',
+            'CD8': 'CD8-A700',
+            'CD14': 'CD14-BUV805'
+        }
+        
+        # Define timepoints of interest
+        self.key_timepoints = ['B1W1', 'B2W2', 'B2W4', 'B4W1']
+        self.timepoint_names = {
+            'B1W1': 'Baseline',
+            'B2W2': 'Post-Pembro',
+            'B2W4': 'Post-IL2', 
+            'B4W1': 'Post-Discontinuation'
+        }
+        
+        print(f"TemporalFlowAnalyzer initialized")
+        print(f"Total samples: {len(self.flow_df)}")
+        print(f"Samples with timepoint info: {self.flow_df['timepoint'].notna().sum()}")
+        print(f"Available timepoints: {sorted(self.flow_df['timepoint'].dropna().unique())}")
+    
+    def _add_timepoint_info(self):
+        """Add timepoint information to flow dataframe"""
+        self.flow_df['timepoint'] = None
+        self.flow_df['block'] = None
+        self.flow_df['week'] = None
+        self.flow_df['phase'] = None
+        self.flow_df['patient_id'] = None
+        
+        # Create mapping from flow filename pattern to timepoints
+        # Flow filenames: Sample_PT 01-1_037.fcs -> Patient 01, timepoint 1
+        # Need to map timepoint numbers to study timepoints
+        
+        timepoint_mapping = {
+            1: {'timepoint': 'B1W1', 'block': 1, 'week': 1, 'phase': 'Baseline_Pre_Treatment'},
+            2: {'timepoint': 'B2W2', 'block': 2, 'week': 2, 'phase': 'Post_Pembrolizumab_Mono'},
+            3: {'timepoint': 'B2W4', 'block': 2, 'week': 4, 'phase': 'Post_IL2_Treatment'},  
+            4: {'timepoint': 'B4W1', 'block': 4, 'week': 1, 'phase': 'Post_IL2_Discontinuation'}
+        }
+        
+        # Extract timepoint info from filename
+        mapped_count = 0
+        for idx, row in self.flow_df.iterrows():
+            filename = str(row.get('Filename', ''))
+            
+            # Extract patient and timepoint from flow filename
+            # Pattern: Sample_PT 01-1_037.fcs -> patient 01, timepoint 1
+            pt_match = re.search(r'PT\s*(\d+)-(\d+)', filename)
+            
+            if pt_match:
+                patient_num = int(pt_match.group(1))
+                timepoint_num = int(pt_match.group(2))
+                
+                # Create study ID format
+                study_id = f"01-{patient_num:03d}"  # 01-001 format
+                
+                # Map timepoint number to study timepoint
+                if timepoint_num in timepoint_mapping:
+                    timepoint_info = timepoint_mapping[timepoint_num]
+                    
+                    self.flow_df.at[idx, 'timepoint'] = timepoint_info['timepoint']
+                    self.flow_df.at[idx, 'block'] = timepoint_info['block']
+                    self.flow_df.at[idx, 'week'] = timepoint_info['week']
+                    self.flow_df.at[idx, 'phase'] = timepoint_info['phase']
+                    self.flow_df.at[idx, 'patient_id'] = study_id
+                    mapped_count += 1
+        
+        print(f"Mapped timepoints for {mapped_count} samples")
+        
+        # Debug: show timepoint distribution
+        timepoint_counts = self.flow_df['timepoint'].value_counts()
+        print("Timepoint distribution:")
+        for tp, count in timepoint_counts.items():
+            print(f"  {tp}: {count}")
+        
+        # Debug: show a few examples
+        print("\nExample mappings:")
+        examples = self.flow_df[self.flow_df['timepoint'].notna()][['Filename', 'timepoint', 'patient_id', 'response_group']].head(5)
+        for _, row in examples.iterrows():
+            print(f"  {row['Filename']} -> {row['timepoint']} (Patient: {row['patient_id']}, Group: {row['response_group']})")
+    
+    def analyze_cross_sectional_differences(self):
+        """
+        Analyze between-group differences at each timepoint
+        """
+        print("\nCROSS-SECTIONAL ANALYSIS: Between-Group Differences by Timepoint")
+        print("="*80)
+        
+        results = {}
+        all_comparisons = []
+        
+        for timepoint in self.key_timepoints:
+            print(f"\n--- {timepoint} ({self.timepoint_names[timepoint]}) ---")
+            
+            timepoint_data = self.flow_df[self.flow_df['timepoint'] == timepoint]
+            
+            if len(timepoint_data) == 0:
+                print(f"No data available for {timepoint}")
+                continue
+            
+            # Check sample sizes by group
+            group_counts = timepoint_data['response_group'].value_counts()
+            print(f"Sample sizes: {group_counts.to_dict()}")
+            
+            results[timepoint] = {}
+            
+            # Analyze each marker
+            for marker_name, parameter_name in self.immune_markers.items():
+                marker_data = timepoint_data[
+                    (timepoint_data['Parameter'] == parameter_name) |
+                    (timepoint_data['Gate name'].str.contains(marker_name, case=False, na=False))
+                ]
+                
+                if len(marker_data) == 0:
+                    continue
+                
+                # Get data by response group
+                group_data = {}
+                for group in ['EXT', 'INT', 'NON']:
+                    group_subset = marker_data[marker_data['response_group'] == group]
+                    values = pd.to_numeric(group_subset[self.measurement_col], errors='coerce').dropna()
+                    group_data[group] = values
+                
+                # Perform pairwise comparisons
+                comparisons = [('EXT', 'NON'), ('EXT', 'INT'), ('INT', 'NON')]
+                marker_results = {}
+                
+                for group1, group2 in comparisons:
+                    if len(group_data[group1]) >= 3 and len(group_data[group2]) >= 3:
+                        # Calculate fold change
+                        mean1 = np.mean(group_data[group1])
+                        mean2 = np.mean(group_data[group2])
+                        fold_change = mean1 / mean2 if mean2 > 0 else np.nan
+                        log2_fc = np.log2(fold_change) if fold_change > 0 else np.nan
+                        
+                        # Statistical test
+                        try:
+                            statistic, p_value = stats.mannwhitneyu(
+                                group_data[group1], group_data[group2], 
+                                alternative='two-sided'
+                            )
+                        except:
+                            statistic, p_value = np.nan, np.nan
+                        
+                        marker_results[f'{group1}_vs_{group2}'] = {
+                            'fold_change': fold_change,
+                            'log2_fold_change': log2_fc,
+                            'p_value': p_value,
+                            'n_group1': len(group_data[group1]),
+                            'n_group2': len(group_data[group2])
+                        }
+                        
+                        # Store for FDR correction
+                        all_comparisons.append({
+                            'timepoint': timepoint,
+                            'marker': marker_name,
+                            'comparison': f'{group1}_vs_{group2}',
+                            'p_value': p_value,
+                            'fold_change': fold_change,
+                            'log2_fold_change': log2_fc
+                        })
+                
+                if marker_results:
+                    results[timepoint][marker_name] = marker_results
+                    
+                    # Print results for this marker at this timepoint
+                    print(f"\n  {marker_name}:")
+                    for comp, comp_data in marker_results.items():
+                        fc = comp_data['fold_change']
+                        log2fc = comp_data['log2_fold_change']
+                        p_val = comp_data['p_value']
+                        n1, n2 = comp_data['n_group1'], comp_data['n_group2']
+                        sig = "***" if p_val < 0.001 else "**" if p_val < 0.01 else "*" if p_val < 0.05 else "ns"
+                        print(f"    {comp} (n={n1},{n2}): FC={fc:.3f}, log2FC={log2fc:.3f}, p={p_val:.2e} {sig}")
+        
+        # Apply FDR correction across all comparisons
+        if all_comparisons:
+            comp_df = pd.DataFrame(all_comparisons)
+            p_values = comp_df['p_value'].dropna().values
+            
+            if len(p_values) > 0:
+                try:
+                    fdr_corrected = false_discovery_control(p_values, alpha=0.05, method='bh')
+                    comp_df.loc[comp_df['p_value'].notna(), 'fdr_significant'] = fdr_corrected
+                except:
+                    # Manual BH correction if scipy version doesn't have the function
+                    fdr_corrected = self._manual_fdr_correction(p_values)
+                    comp_df.loc[comp_df['p_value'].notna(), 'fdr_significant'] = fdr_corrected
+                
+                # Show FDR-significant results
+                fdr_sig = comp_df[comp_df.get('fdr_significant', False) == True]
+                
+                print(f"\n" + "="*80)
+                print(f"FDR-SIGNIFICANT CROSS-SECTIONAL RESULTS (q<0.05):")
+                print(f"="*80)
+                
+                if len(fdr_sig) > 0:
+                    for _, row in fdr_sig.iterrows():
+                        tp_name = self.timepoint_names[row['timepoint']]
+                        direction = "higher" if row['fold_change'] > 1 else "lower"
+                        print(f"• {row['marker']} at {tp_name} ({row['comparison']}): {row['fold_change']:.2f}-fold {direction}")
+                        print(f"  p={row['p_value']:.2e}, log2FC={row['log2_fold_change']:.3f}")
+                else:
+                    print("No cross-sectional differences survive FDR correction")
+        
+        return results, comp_df if 'comp_df' in locals() else None
+    
+    def analyze_longitudinal_changes(self):
+        """
+        Analyze within-group changes over time
+        """
+        print(f"\n" + "="*80)
+        print("LONGITUDINAL ANALYSIS: Within-Group Changes Over Time")
+        print("="*80)
+        
+        longitudinal_results = {}
+        all_long_comparisons = []
+        
+        # For each response group
+        for response_group in ['EXT', 'INT', 'NON']:
+            print(f"\n--- {response_group} RESPONDERS ---")
+            
+            group_data = self.flow_df[self.flow_df['response_group'] == response_group]
+            longitudinal_results[response_group] = {}
+            
+            # For each marker
+            for marker_name, parameter_name in self.immune_markers.items():
+                marker_data = group_data[
+                    (group_data['Parameter'] == parameter_name) |
+                    (group_data['Gate name'].str.contains(marker_name, case=False, na=False))
+                ]
+                
+                if len(marker_data) == 0:
+                    continue
+                
+                # Get data by timepoint
+                timepoint_data = {}
+                for tp in self.key_timepoints:
+                    tp_subset = marker_data[marker_data['timepoint'] == tp]
+                    values = pd.to_numeric(tp_subset[self.measurement_col], errors='coerce').dropna()
+                    if len(values) >= 3:  # Minimum sample size
+                        timepoint_data[tp] = values
+                
+                if len(timepoint_data) < 2:  # Need at least 2 timepoints
+                    continue
+                
+                # Pairwise timepoint comparisons - now with proper study design
+                timepoint_pairs = [
+                    ('B1W1', 'B2W2'),  # Baseline vs Post-Pembrolizumab
+                    ('B2W2', 'B2W4'),  # Post-Pembro vs Post-IL2 (IL-2 effect)
+                    ('B1W1', 'B2W4'),  # Baseline vs Post-IL2 (combined treatment effect)
+                    ('B2W4', 'B4W1'),  # Post-IL2 vs Post-Discontinuation (recovery)
+                    ('B1W1', 'B4W1')   # Baseline vs Final (overall treatment effect)
+                ]
+                
+                marker_long_results = {}
+                
+                print(f"\n  {marker_name}:")
+                print(f"    Available timepoints: {list(timepoint_data.keys())}")
+                
+                for tp1, tp2 in timepoint_pairs:
+                    if tp1 in timepoint_data and tp2 in timepoint_data:
+                        # Calculate fold change
+                        mean1 = np.mean(timepoint_data[tp1])
+                        mean2 = np.mean(timepoint_data[tp2])
+                        fold_change = mean2 / mean1 if mean1 > 0 else np.nan  # Later vs Earlier
+                        log2_fc = np.log2(fold_change) if fold_change > 0 else np.nan
+                        
+                        # Paired or unpaired test (assume unpaired for now)
+                        try:
+                            statistic, p_value = stats.mannwhitneyu(
+                                timepoint_data[tp1], timepoint_data[tp2], 
+                                alternative='two-sided'
+                            )
+                        except:
+                            statistic, p_value = np.nan, np.nan
+                        
+                        marker_long_results[f'{tp1}_to_{tp2}'] = {
+                            'fold_change': fold_change,
+                            'log2_fold_change': log2_fc,
+                            'p_value': p_value,
+                            'n_tp1': len(timepoint_data[tp1]),
+                            'n_tp2': len(timepoint_data[tp2])
+                        }
+                        
+                        # Store for FDR correction
+                        all_long_comparisons.append({
+                            'response_group': response_group,
+                            'marker': marker_name,
+                            'comparison': f'{tp1}_to_{tp2}',
+                            'p_value': p_value,
+                            'fold_change': fold_change,
+                            'log2_fold_change': log2_fc
+                        })
+                        
+                        # Print result
+                        direction = "increased" if fold_change > 1 else "decreased"
+                        tp1_name = self.timepoint_names.get(tp1, tp1)
+                        tp2_name = self.timepoint_names.get(tp2, tp2)
+                        sig = "***" if p_value < 0.001 else "**" if p_value < 0.01 else "*" if p_value < 0.05 else "ns"
+                        
+                        print(f"    {tp1_name} → {tp2_name}: {fold_change:.3f}x ({direction}), p={p_value:.2e} {sig}")
+                
+                if marker_long_results:
+                    longitudinal_results[response_group][marker_name] = marker_long_results
+        
+        # Apply FDR correction to longitudinal comparisons
+        if all_long_comparisons:
+            long_df = pd.DataFrame(all_long_comparisons)
+            p_values = long_df['p_value'].dropna().values
+            
+            if len(p_values) > 0:
+                try:
+                    fdr_corrected = false_discovery_control(p_values, alpha=0.05, method='bh')
+                    long_df.loc[long_df['p_value'].notna(), 'fdr_significant'] = fdr_corrected
+                except:
+                    fdr_corrected = self._manual_fdr_correction(p_values)
+                    long_df.loc[long_df['p_value'].notna(), 'fdr_significant'] = fdr_corrected
+                
+                # Show FDR-significant longitudinal results
+                fdr_sig_long = long_df[long_df.get('fdr_significant', False) == True]
+                
+                print(f"\n" + "="*80)
+                print(f"FDR-SIGNIFICANT LONGITUDINAL RESULTS (q<0.05):")
+                print(f"="*80)
+                
+                if len(fdr_sig_long) > 0:
+                    for _, row in fdr_sig_long.iterrows():
+                        direction = "increased" if row['fold_change'] > 1 else "decreased"
+                        tp_names = row['comparison'].replace('_to_', ' → ').replace('B1W1', 'Baseline').replace('B2W4', 'Post-IL2').replace('B4W1', 'Final')
+                        print(f"• {row['response_group']} group - {row['marker']} {tp_names}: {row['fold_change']:.2f}x {direction}")
+                        print(f"  p={row['p_value']:.2e}, log2FC={row['log2_fold_change']:.3f}")
+                else:
+                    print("No longitudinal changes survive FDR correction")
+        
+        return longitudinal_results, long_df if 'long_df' in locals() else None
+    
+    def _manual_fdr_correction(self, p_values, alpha=0.05):
+        """Manual Benjamini-Hochberg FDR correction"""
+        n = len(p_values)
+        sorted_indices = np.argsort(p_values)
+        sorted_p_values = p_values[sorted_indices]
+        
+        rejected = np.zeros(n, dtype=bool)
+        
+        for i in range(n-1, -1, -1):
+            if sorted_p_values[i] <= (i + 1) / n * alpha:
+                rejected[sorted_indices[:i+1]] = True
+                break
+        
+        return rejected
+    
+    def create_temporal_visualizations(self, cross_sectional_results, longitudinal_results):
+        """
+        Create comprehensive temporal visualizations
+        """
+        print(f"\nCreating temporal visualizations...")
+        
+        fig = plt.figure(figsize=(20, 16))
+        
+        # 1. Heatmap of cross-sectional differences
+        ax1 = plt.subplot(3, 3, 1)
+        self._plot_cross_sectional_heatmap(ax1, cross_sectional_results)
+        
+        # 2. Longitudinal trajectories for key markers
+        ax2 = plt.subplot(3, 3, 2)
+        self._plot_longitudinal_trajectories(ax2, ['CD16', 'CD4'])
+        
+        # 3. Timepoint comparison for most significant marker
+        ax3 = plt.subplot(3, 3, 3)
+        self._plot_timepoint_distributions(ax3, 'CD16')
+        
+        # 4. Fold change over time by group
+        ax4 = plt.subplot(3, 3, 4)
+        self._plot_fold_change_over_time(ax4, longitudinal_results)
+        
+        # 5. Sample sizes by timepoint and group
+        ax5 = plt.subplot(3, 3, 5)
+        self._plot_sample_sizes_temporal(ax5)
+        
+        # 6. Treatment phase effects
+        ax6 = plt.subplot(3, 3, 6)
+        self._plot_treatment_phase_effects(ax6)
+        
+        plt.tight_layout()
+        plt.savefig('temporal_flow_analysis.png', dpi=300, bbox_inches='tight')
+        plt.show()
+    
+    def _plot_cross_sectional_heatmap(self, ax, results):
+        """Plot heatmap of cross-sectional log2 fold changes"""
+        # Create matrix for EXT vs NON comparisons at each timepoint
+        markers = list(self.immune_markers.keys())
+        timepoints = self.key_timepoints
+        
+        heatmap_data = np.full((len(markers), len(timepoints)), np.nan)
+        
+        for i, marker in enumerate(markers):
+            for j, tp in enumerate(timepoints):
+                if tp in results and marker in results[tp]:
+                    comp_data = results[tp][marker].get('EXT_vs_NON', {})
+                    log2fc = comp_data.get('log2_fold_change', np.nan)
+                    heatmap_data[i, j] = log2fc
+        
+        mask = np.isnan(heatmap_data)
+        
+        sns.heatmap(heatmap_data, 
+                   xticklabels=[self.timepoint_names[tp] for tp in timepoints],
+                   yticklabels=markers,
+                   annot=True, fmt='.2f', cmap='RdBu_r', center=0,
+                   mask=mask, cbar_kws={'label': 'Log2FC (EXT vs NON)'}, ax=ax)
+        ax.set_title('Cross-Sectional Differences\n(EXT vs NON by Timepoint)')
+    
+    def _plot_longitudinal_trajectories(self, ax, key_markers):
+        """Plot longitudinal trajectories for key markers"""
+        for marker in key_markers:
+            if marker not in self.immune_markers:
+                continue
+                
+            parameter_name = self.immune_markers[marker]
+            
+            for response_group in ['EXT', 'INT', 'NON']:
+                timepoint_means = []
+                timepoint_labels = []
+                
+                for tp in self.key_timepoints:
+                    marker_data = self.flow_df[
+                        (self.flow_df['Parameter'] == parameter_name) &
+                        (self.flow_df['response_group'] == response_group) &
+                        (self.flow_df['timepoint'] == tp)
+                    ]
+                    
+                    if len(marker_data) > 0:
+                        values = pd.to_numeric(marker_data[self.measurement_col], errors='coerce').dropna()
+                        if len(values) > 0:
+                            timepoint_means.append(np.mean(values))
+                            timepoint_labels.append(tp)
+                
+                if len(timepoint_means) >= 2:
+                    ax.plot(timepoint_labels, timepoint_means, 
+                           marker='o', linewidth=2, markersize=6,
+                           label=f'{marker} {response_group}')
+        
+        ax.set_xlabel('Timepoint')
+        ax.set_ylabel(f'{self.measurement_col} (AU)')
+        ax.set_title('Longitudinal Trajectories')
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        ax.grid(alpha=0.3)
+    
+    def _plot_timepoint_distributions(self, ax, marker):
+        """Plot distributions at each timepoint for a specific marker"""
+        if marker not in self.immune_markers:
+            return
+            
+        parameter_name = self.immune_markers[marker]
+        marker_data = self.flow_df[
+            (self.flow_df['Parameter'] == parameter_name) &
+            (self.flow_df['timepoint'].isin(self.key_timepoints))
+        ]
+        
+        if len(marker_data) > 0:
+            # Create violin plot
+            plot_data = []
+            for _, row in marker_data.iterrows():
+                value = pd.to_numeric(row[self.measurement_col], errors='coerce')
+                if pd.notna(value):
+                    plot_data.append({
+                        'value': value,
+                        'timepoint': self.timepoint_names.get(row['timepoint'], row['timepoint']),
+                        'response_group': row['response_group']
+                    })
+            
+            if plot_data:
+                plot_df = pd.DataFrame(plot_data)
+                sns.violinplot(data=plot_df, x='timepoint', y='value', hue='response_group', ax=ax)
+                ax.set_title(f'{marker} Distribution by Timepoint')
+                ax.set_ylabel(f'{marker} {self.measurement_col}')
+    
+    def _plot_fold_change_over_time(self, ax, longitudinal_results):
+        """Plot fold changes over time"""
+        # Show B1W1 to B2W4 changes (baseline to post-IL2) for each group and marker
+        markers = []
+        ext_fcs = []
+        int_fcs = []
+        non_fcs = []
+        
+        for marker in self.immune_markers.keys():
+            baseline_to_post_il2 = 'B1W1_to_B2W4'  # Most clinically relevant comparison
+            
+            ext_fc = longitudinal_results.get('EXT', {}).get(marker, {}).get(baseline_to_post_il2, {}).get('log2_fold_change', np.nan)
+            int_fc = longitudinal_results.get('INT', {}).get(marker, {}).get(baseline_to_post_il2, {}).get('log2_fold_change', np.nan)
+            non_fc = longitudinal_results.get('NON', {}).get(marker, {}).get(baseline_to_post_il2, {}).get('log2_fold_change', np.nan)
+            
+            if not all(np.isnan([ext_fc, int_fc, non_fc])):
+                markers.append(marker)
+                ext_fcs.append(ext_fc)
+                int_fcs.append(int_fc)
+                non_fcs.append(non_fc)
+        
+        if markers:
+            x = np.arange(len(markers))
+            width = 0.25
+            
+            ax.bar(x - width, ext_fcs, width, label='EXT', alpha=0.8)
+            ax.bar(x, int_fcs, width, label='INT', alpha=0.8)
+            ax.bar(x + width, non_fcs, width, label='NON', alpha=0.8)
+            
+            ax.set_xlabel('Immune Markers')
+            ax.set_ylabel('Log2 Fold Change (Baseline → Post-IL2)')
+            ax.set_title('Treatment Response by Response Group')
+            ax.set_xticks(x)
+            ax.set_xticklabels(markers, rotation=45)
+            ax.legend()
+            ax.grid(axis='y', alpha=0.3)
+            ax.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+    
+    def _plot_sample_sizes_temporal(self, ax):
+        """Plot sample sizes by timepoint and response group"""
+        sample_counts = []
+        
+        for tp in self.key_timepoints:
+            tp_data = self.flow_df[self.flow_df['timepoint'] == tp]
+            counts = tp_data['response_group'].value_counts()
+            
+            sample_counts.append({
+                'timepoint': self.timepoint_names[tp],
+                'EXT': counts.get('EXT', 0),
+                'INT': counts.get('INT', 0), 
+                'NON': counts.get('NON', 0)
+            })
+        
+        if sample_counts:
+            count_df = pd.DataFrame(sample_counts)
+            
+            x = np.arange(len(count_df))
+            width = 0.25
+            
+            ax.bar(x - width, count_df['EXT'], width, label='EXT', alpha=0.8)
+            ax.bar(x, count_df['INT'], width, label='INT', alpha=0.8)
+            ax.bar(x + width, count_df['NON'], width, label='NON', alpha=0.8)
+            
+            ax.set_xlabel('Timepoint')
+            ax.set_ylabel('Number of Samples')
+            ax.set_title('Sample Sizes by Timepoint')
+            ax.set_xticks(x)
+            ax.set_xticklabels(count_df['timepoint'])
+            ax.legend()
+            ax.grid(axis='y', alpha=0.3)
+    
+    def _plot_treatment_phase_effects(self, ax):
+        """Plot treatment phase effects"""
+        # Compare treatment phases for key markers
+        phase_data = self.flow_df[self.flow_df['phase'].notna()]
+        
+        if len(phase_data) > 0:
+            # Focus on CD16 as the most significant marker
+            cd16_data = phase_data[phase_data['Parameter'] == 'CD16-A647']
+            
+            if len(cd16_data) > 0:
+                plot_data = []
+                for _, row in cd16_data.iterrows():
+                    value = pd.to_numeric(row[self.measurement_col], errors='coerce')
+                    if pd.notna(value):
+                        plot_data.append({
+                            'value': value,
+                            'phase': row['phase'],
+                            'response_group': row['response_group']
+                        })
+                
+                if plot_data:
+                    plot_df = pd.DataFrame(plot_data)
+                    sns.boxplot(data=plot_df, x='phase', y='value', hue='response_group', ax=ax)
+                    ax.set_title('CD16+ NK Cells by Treatment Phase')
+                    ax.set_xlabel('Treatment Phase')
+                    ax.set_ylabel('CD16 Expression')
+                    ax.tick_params(axis='x', rotation=45)
+
+def run_temporal_analysis(flow_df, sample_to_timepoint):
+    """
+    Run complete temporal analysis
+    """
+    # Import re module for regex operations
+    import re
+    
+    analyzer = TemporalFlowAnalyzer(flow_df, sample_to_timepoint)
+    
+    # Run cross-sectional analysis
+    cross_results, cross_df = analyzer.analyze_cross_sectional_differences()
+    
+    # Run longitudinal analysis  
+    long_results, long_df = analyzer.analyze_longitudinal_changes()
+    
+    # Create visualizations
+    analyzer.create_temporal_visualizations(cross_results, long_results)
+    
+    # Export results
+    if cross_df is not None:
+        cross_df.to_csv('cross_sectional_temporal_results.csv', index=False)
+        print("✓ Cross-sectional results exported to 'cross_sectional_temporal_results.csv'")
+    
+    if long_df is not None:
+        long_df.to_csv('longitudinal_temporal_results.csv', index=False)
+        print("✓ Longitudinal results exported to 'longitudinal_temporal_results.csv'")
+    
+    return analyzer, cross_results, long_results
+
+# Example usage
+if __name__ == "__main__":
+    print("Temporal Flow Cytometry Analysis Module")
+    print("Usage: analyzer, cross_results, long_results = run_temporal_analysis(flow_df, sample_to_timepoint)")
+
+
+# In[94]:
+
+
+# Create sample_to_timepoint dictionary from flow_df_ready
+sample_to_timepoint = {}
+
+# Extract sample/timepoint info from filenames in flow_df_ready
+for _, row in flow_df_ready.iterrows():
+    filename = str(row.get('Filename', ''))
+    
+    # Extract patient and timepoint from flow filename
+    # Pattern: Sample_PT 01-1_037.fcs -> patient 01, timepoint 1
+    import re
+    pt_match = re.search(r'PT\s*(\d+)-(\d+)', filename)
+    
+    if pt_match:
+        patient_num = int(pt_match.group(1))
+        timepoint_num = int(pt_match.group(2))
+        
+        # Create study ID format
+        study_id = f"01-{patient_num:03d}"  # 01-001 format
+        
+        # Map timepoint number to study timepoint
+        timepoint_mapping = {
+            1: 'B1W1',
+            2: 'B2W2',
+            3: 'B2W4',
+            4: 'B4W1'
+        }
+        
+        if timepoint_num in timepoint_mapping:
+            timepoint = timepoint_mapping[timepoint_num]
+            sample_to_timepoint[filename] = {
+                'patient_id': study_id,
+                'timepoint': timepoint
+            }
+
+# Now run the temporal analysis with the created dictionary
+analyzer, cross_results, long_results = run_temporal_analysis(flow_df_ready, sample_to_timepoint)
 
 
 # In[28]:
@@ -1507,6 +2205,18 @@ generator, figures = run_separate_cd25_plots(
     'CICPT_1558_data (3).xlsx',
     save_directory='cd25_plots',
     file_format='png')
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
 
 
 # In[33]:
@@ -3539,10 +4249,4 @@ plt.show()
 baseline_patient_fig.savefig('PD1_baseline_heatmap_by_patient_clean.png', dpi=600, bbox_inches='tight')
 baseline_patient_fig.savefig('PD1_baseline_heatmap_by_patient_clean.pdf', bbox_inches='tight')
 print("✓ Baseline patient heatmap saved")
-
-
-# In[ ]:
-
-
-
 
