@@ -4,7 +4,7 @@ A comprehensive analysis pipeline for multi-omics biomarker discovery in patient
 
 ## Study Overview
 
-This repository contains analysis code for a clinical trial investigating sequential pembrolizumab followed by high-dose IL-2 therapy in patients with metastatic renal cell carcinoma. The study evaluates treatment-free survival (TFS) outcomes and identifies biomarkers predictive of response.
+This repository contains analysis code for a clinical trial investigating sequential pembrolizumab followed by high-dose IL-2 therapy in patients with metastatic renal cell carcinoma. The study evaluates treatment-free survival (TFS) outcomes and identifies biomarkers associated with response.
 
 **Clinical Trial:** NCT02964078  
 **Treatment Schedule:**
